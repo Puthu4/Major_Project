@@ -7,6 +7,7 @@ const router = express.Router();
    BLOCK USER (Triggered from malpractice in Challenge page)
 ----------------------------------------------------------*/
 router.post("/block-user", async (req, res) => {
+  console.log("BLOCK USER API CALLED:", req.body.email);
   try {
     const { email, reason } = req.body;
 

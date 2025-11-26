@@ -9,7 +9,7 @@ export default function CodeEditor() {
   const { id } = useParams();
   const navigate = useNavigate(); 
   const email = localStorage.getItem("email");
-const userId = localStorage.getItem("userId");
+  const userId = localStorage.getItem("userId");
 
   const [challenge, setChallenge] = useState(null);
   const [code, setCode] = useState("// Write your code here");
@@ -38,6 +38,40 @@ const userId = localStorage.getItem("userId");
   };
     // ---------------------- 👇 FACE PROCTORING STATE ----------------------
   const videoRef = useRef(null);
+  const handleGlobalMalpractice = () => {
+  setMalpracticeCount((prev) => {
+    const newCount = prev + 1;
+
+    // First & second violations → only WARN
+    if (newCount <= 2) {
+      setShowMalpracticeWarning(true);
+    }
+
+    // Third violation → BLOCK
+    if (newCount === 3) {
+      setIsBlocked(true);
+
+      // Stop webcam
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+      }
+
+      // Block user in backend
+      fetch("/api/block-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: localStorage.getItem("email"),
+          reason: "Malpractice detected automatically",
+        }),
+      });
+
+      alert("⚠️ Malpractice detected — you are blocked!");
+    }
+
+    return newCount;
+  });
+};
   const canvasRef = useRef(null);
   const [proctorIntervalId, setProctorIntervalId] = useState(null);
 
@@ -75,9 +109,9 @@ const userId = localStorage.getItem("userId");
 async function proctorCheck() {
   try {
     const frame = captureFrame();
-    if (!frame) return;
+    if (!frame) return; // no malpractice for missing frame
 
-    const res = await fetch("http://localhost:5000/api/proctor/check", {
+    const res = await fetch("/api/proctor/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -87,44 +121,22 @@ async function proctorCheck() {
       }),
     });
 
+    if (!res.ok) return;
+
     const data = await res.json();
-    if (data.status === "ok") return;
 
-    // 🚨 Handle malpractice attempt
-    setMalpracticeCount((prev) => prev + 1);
-
-    const newCount = malpracticeCount + 1; // we manually calculate next value
-
-    if (newCount <= 2) {
-      setShowMalpracticeWarning(true); // show warning
-    } else {
-      // 🚨 THIRD VIOLATION → BLOCK USER
-      setIsBlocked(true);
-      setShowMalpracticeWarning(false);
-
-      // stop webcam
-      if (videoRef.current?.srcObject) {
-        videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-      }
-
-      // ❗ Moved OUTSIDE setState callback → safe to await
-      await fetch("http://localhost:5000/api/block-user", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: localStorage.getItem("email"),
-          reason: "Malpractice detected",
-        }),
-      });
-
-      alert("⚠️ Malpractice detected — challenge access disabled.");
+    // ONLY one condition triggers malpractice
+    if (data.status === "mismatch") {
+      console.warn("Mismatch detected:", data.distance);
+      handleGlobalMalpractice(); // only once
+      return;
     }
 
-    if (isBlocked) return;
+    if (data.status === "noface") return;
+    if (data.status === "error") return;
 
-    console.warn("Facial malpractice detected:", data.status);
   } catch (err) {
-    console.error("Face proctor error:", err);
+    console.error("Proctor check failed:", err);
   }
 }
 
@@ -135,63 +147,115 @@ async function proctorCheck() {
   // 🚨 Malpractice detection state
 const [showMalpracticeWarning, setShowMalpracticeWarning] = useState(false);
 
-    useEffect(() => {
-    fetchChallenge();
-    enterFullscreen(); // ✅ auto fullscreen on mount
-      startWebcam();
-       // Run a check every 15 seconds (tweak as needed)
-  const idInterval = setInterval(proctorCheck, 15000);
-  setProctorIntervalId(idInterval);
-    // listen for ESC or exiting fullscreen
-    window.addEventListener("keydown", handleEscPress);
-document.addEventListener("fullscreenchange", handleFullscreenChange);
+useEffect(() => {
+  fetchChallenge();
+  enterFullscreen();
+  startWebcam();
 
-// 🚨 Malpractice detection listeners
-window.addEventListener("copy", handleMalpractice);
-window.addEventListener("cut", handleMalpractice);
-window.addEventListener("paste", handleMalpractice);
-window.addEventListener("blur", handleMalpractice); // when user switches tab or window
-window.addEventListener("visibilitychange", handleVisibilityChange);
-window.addEventListener("storage", (e) => {
-  if (e.key === `challengeSession_${id}` && e.newValue !== sessionId) triggerMalpractice();
-});
-window.addEventListener("contextmenu", (e) => e.preventDefault());
-const devtoolsCheck = () => {
-  const threshold = 160;
-  const widthDiff = window.outerWidth - window.innerWidth;
-  const heightDiff = window.outerHeight - window.innerHeight;
-  if (widthDiff > threshold || heightDiff > threshold) triggerMalpractice();
-};
-setInterval(devtoolsCheck, 2000);
+  // ================= PROCTOR CHECK DELAY ==================
+  let idInterval;
 
-const detectDevTools = () => {
-  const start = performance.now();
-  debugger;
-  const end = performance.now();
-  if (end - start > 100) triggerMalpractice(); // DevTools paused execution
-};
-setInterval(detectDevTools, 2000);
+  const startChecks = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5000)); // delay for webcam + backend models
+    await proctorCheck(); // first check
+    idInterval = setInterval(proctorCheck, 15000); // every 15 seconds
+    setProctorIntervalId(idInterval);
+  };
+  startChecks();
 
+  // ==================== MALPRACTICE TRIGGERS =====================
 
-   return () => {
-   // Cleanup
-  if (idInterval) clearInterval(idInterval);
-  setProctorIntervalId(null);
+  // ---- ESC KEY ----
+  const handleEscPress = (e) => {
+    if (e.key === "Escape") handleGlobalMalpractice();
+  };
+  window.addEventListener("keydown", handleEscPress);
 
-  // Stop webcam tracks
-  if (videoRef.current && videoRef.current.srcObject) {
-  videoRef.current.srcObject.getTracks().forEach((t) => t.stop());}
+  // ---- COPY/CUT/PASTE ----
+  const copyHandler = () => handleGlobalMalpractice();
+  window.addEventListener("copy", copyHandler);
+  window.addEventListener("cut", copyHandler);
+  window.addEventListener("paste", copyHandler);
 
-  window.removeEventListener("keydown", handleEscPress);
-  document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  window.removeEventListener("copy", handleMalpractice);
-  window.removeEventListener("cut", handleMalpractice);
-  window.removeEventListener("paste", handleMalpractice);
-  window.removeEventListener("blur", handleMalpractice);
-  window.removeEventListener("visibilitychange", handleVisibilityChange);
-};
+  // ---- VISIBILITY CHANGE (Tab switch) ----
+  const visibilityHandler = () => {
+    if (document.hidden) handleGlobalMalpractice();
+  };
+  document.addEventListener("visibilitychange", visibilityHandler);
 
-  }, [id]);
+  // ---- BLUR (Alt+Tab or window change) ----
+  let blurCooldown = false;
+  const blurHandler = () => {
+    if (blurCooldown) return;
+    blurCooldown = true;
+    handleGlobalMalpractice();
+    setTimeout(() => (blurCooldown = false), 1500);
+  };
+  window.addEventListener("blur", blurHandler);
+
+  // ---- FULLSCREEN EXIT ----
+  const fullscreenHandler = () => {
+    if (!document.fullscreenElement) handleGlobalMalpractice();
+  };
+  document.addEventListener("fullscreenchange", fullscreenHandler);
+
+  // ---- BLOCK RIGHT CLICK ----
+  const contextMenuHandler = (e) => e.preventDefault();
+  window.addEventListener("contextmenu", contextMenuHandler);
+
+  // ---- DEVTOOLS DETECTION (Resize Heuristic) ----
+  let devtoolsCooldown = false;
+  const devtoolsCheck = () => {
+    const threshold = 160;
+    const widthDiff = window.outerWidth - window.innerWidth;
+    const heightDiff = window.outerHeight - window.innerHeight;
+
+    if ((widthDiff > threshold || heightDiff > threshold) && !devtoolsCooldown) {
+      handleGlobalMalpractice();
+      devtoolsCooldown = true;
+      setTimeout(() => (devtoolsCooldown = false), 1500);
+    }
+  };
+  const devtoolsInterval1 = setInterval(devtoolsCheck, 2000);
+
+  // ---- DEVTOOLS DETECTION (Debugger Delay) ----
+  const detectDevTools = () => {
+    const start = performance.now();
+    debugger;
+    const end = performance.now();
+    if (end - start > 120 && !devtoolsCooldown) {
+      handleGlobalMalpractice();
+      devtoolsCooldown = true;
+      setTimeout(() => (devtoolsCooldown = false), 1500);
+    }
+  };
+  const devtoolsInterval2 = setInterval(detectDevTools, 2000);
+
+  // ====================== CLEANUP ==========================
+  return () => {
+    if (idInterval) clearInterval(idInterval);
+    setProctorIntervalId(null);
+
+    if (videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
+    }
+
+    window.removeEventListener("keydown", handleEscPress);
+    window.removeEventListener("copy", copyHandler);
+    window.removeEventListener("cut", copyHandler);
+    window.removeEventListener("paste", copyHandler);
+
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    window.removeEventListener("blur", blurHandler);
+    document.removeEventListener("fullscreenchange", fullscreenHandler);
+
+    window.removeEventListener("contextmenu", contextMenuHandler);
+
+    clearInterval(devtoolsInterval1);
+    clearInterval(devtoolsInterval2);
+  };
+}, [id]);
+
 
   const enterFullscreen = () => {
     const elem = document.documentElement;
@@ -215,27 +279,27 @@ setInterval(detectDevTools, 2000);
       setShowFullscreenWarning(false);
     }
   };
-// 🚨 Handle malpractice attempts like copy/paste or tab switch
-const handleMalpractice = (e) => {
-  e.preventDefault();
-  triggerMalpractice();
-};
+// // 🚨 Handle malpractice attempts like copy/paste or tab switch
+// const handleMalpractice = (e) => {
+//   e.preventDefault();
+//   triggerMalpractice();
+// };
 
 // 🚨 Detect when tab is hidden or user switches windows
 const handleVisibilityChange = () => {
   if (document.hidden) triggerMalpractice();
 };
 
-const triggerMalpractice = () => {
-  if (malpracticeCount >= 1) {
-    // Second offense → remove from challenge
-    navigate("/challenges");
-  } else {
-    // First warning
-    setShowMalpracticeWarning(true);
-    setMalpracticeCount(prev => prev + 1);
-  }
-};
+// const triggerMalpractice = () => {
+//   if (malpracticeCount >= 1) {
+//     // Second offense → remove from challenge
+//     navigate("/challenges");
+//   } else {
+//     // First warning
+//     setShowMalpracticeWarning(true);
+//     handleGlobalMalpractice();
+//  }
+// };
 
   // countdown logic when fullscreen warning appears
   useEffect(() => {
